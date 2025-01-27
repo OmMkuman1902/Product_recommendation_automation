@@ -25,22 +25,19 @@ def create_user_item_matrix(ratings_df):
                                   shape=(len(user_mapper), len(product_mapper)))
     return user_item_matrix, user_mapper, {v: k for k, v in product_mapper.items()}
 
-# Recommendation function
 def recommend_products(user_id, user_item_matrix, user_mapper, reverse_product_mapper, products_df, k=5):
-    # Collaborative Filtering
     try:
         user_idx = user_mapper[user_id]
     except KeyError:
-        return [], []  # No recommendations if the user is not found
+        return []  # No recommendations if the user is not found
 
-    user_vector = user_item_matrix[user_idx, :].toarray().flatten()
-
+    # Collaborative Filtering
     knn = NearestNeighbors(metric='cosine', algorithm='brute')
     knn.fit(user_item_matrix)
-
+    user_vector = user_item_matrix[user_idx, :].toarray().flatten()
     distances, indices = knn.kneighbors([user_vector], n_neighbors=k + 10)
 
-    # Filter valid indices for Collaborative Filtering
+    # Filter valid recommendations for CF
     valid_indices = [i for i in indices.flatten()[1:] if i in reverse_product_mapper]
     recommended_ids_cf = [reverse_product_mapper[i] for i in valid_indices]
 
@@ -50,28 +47,38 @@ def recommend_products(user_id, user_item_matrix, user_mapper, reverse_product_m
     tfidf_matrix = tfidf.fit_transform(products_df['description'])
 
     user_products = ratings[ratings['userId'] == user_id]['productId'].tolist()
-    user_product_idx = products_df[products_df['productId'].isin(user_products)].index
-    if user_product_idx.empty:
-        return [], []  # No content-based recommendations if user has no history
-
-    user_profiles = tfidf_matrix[user_product_idx]
-
-    content_similarities = cosine_similarity(user_profiles, tfidf_matrix)
-    content_scores = content_similarities.mean(axis=0)
-    recommended_ids_cb = products_df.iloc[content_scores.argsort()[::-1]]['productId'].tolist()
-
-    # Combine Collaborative and Content-Based Recommendations
-    final_recommendations = list(dict.fromkeys(recommended_ids_cf + recommended_ids_cb))[:k]
-    recommended_titles = products_df[products_df['productId'].isin(final_recommendations)]['title'].tolist()
-
-    # Get titles of products in the same category
     if user_products:
-        user_category = products_df[products_df['productId'] == user_products[-1]]['category'].values[0]
-        category_titles = products_df[products_df['category'] == user_category]['title'].tolist()
+        user_product_idx = products_df[products_df['productId'].isin(user_products)].index
+        user_profiles = tfidf_matrix[user_product_idx]
+        content_similarities = cosine_similarity(user_profiles, tfidf_matrix)
+        content_scores = content_similarities.mean(axis=0)
+        recommended_ids_cb = products_df.iloc[content_scores.argsort()[::-1]]['productId'].tolist()
     else:
-        category_titles = []
+        recommended_ids_cb = []
 
-    return recommended_titles, category_titles
+    # Merge Recommendations
+    final_recommendations = list(dict.fromkeys(recommended_ids_cb + recommended_ids_cf))
+
+    # Filter by category with safe handling for missing data
+    if user_products:
+        try:
+            user_category = products_df[products_df['productId'] == user_products[-1]]['category'].values[0]
+            final_recommendations = [
+                prod for prod in final_recommendations
+                if not products_df.loc[products_df['productId'] == prod].empty and
+                   products_df.loc[products_df['productId'] == prod, 'category'].values[0] == user_category
+            ][:k]
+        except IndexError:
+            # Handle cases where product or category is missing
+            final_recommendations = []
+    else:
+        final_recommendations = []
+        #test
+
+    # Get Titles for Recommendations
+    recommended_titles = products_df[products_df['productId'].isin(final_recommendations)]['title'].tolist()
+    return recommended_titles
+
 
 # Flask routes
 @app.route('/')
@@ -110,9 +117,9 @@ def submit():
     user_item_matrix, user_mapper, reverse_product_mapper = create_user_item_matrix(ratings)
 
     # Generate recommendations
-    recommendations, category_titles = recommend_products(new_user_id, user_item_matrix, user_mapper, reverse_product_mapper, products, k=5)
+    recommendations = recommend_products(new_user_id, user_item_matrix, user_mapper, reverse_product_mapper, products, k=5)
 
-    return render_template('recommendations.html', recommendations=recommendations, category_titles=category_titles)
+    return render_template('recommendations.html', recommendations=recommendations)
 
 if __name__ == '__main__':
     app.run(debug=True)
